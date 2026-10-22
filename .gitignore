@@ -1,0 +1,7 @@
+node_modules/
+dist/
+Wdist/
+.env
+.env.*
+!.env.example
+*.log

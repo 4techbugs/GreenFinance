@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Green Finance | Executive Login</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="login-body">
+  <div class="login-shell">
+    <div class="login-card">
+      <div class="login-brand">
+        <div class="login-logo">L</div>
+        <div>
+          <small>Green Finance</small>
+          <h1>Executive Login</h1>
+        </div>
+      </div>
+
+      <form id="loginForm" class="login-form">
+        <label>
+          Username
+          <input id="username" type="text" name="username" placeholder="Enter your username" required>
+        </label>
+
+        <label>
+          Password
+          <input id="password" type="password" name="password" placeholder="Enter your password" required>
+        </label>
+
+        <button type="submit" class="login-btn">Login</button>
+        <p id="loginMessage" class="login-message" aria-live="polite"></p>
+      </form>
+
+      <div class="login-meta">
+        <strong>Note:</strong> use your executive username and password from the SQL table.
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const AUTH_KEY = 'green_finance_exec_session';
+
+    function showMessage(message, isError = true) {
+      const el = document.getElementById('loginMessage');
+      if (!el) return;
+      el.textContent = message;
+      el.style.color = isError ? '#b3374d' : '#187c48';
+    }
+
+    function setSession(user) {
+      localStorage.setItem(AUTH_KEY, JSON.stringify(user));
+    }
+
+    async function loginUser(username, password) {
+      const response = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password })
+      });
+
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.error || 'Login failed');
+      }
+
+      setSession(data.user);
+      return data.user;
+    }
+
+    document.getElementById('loginForm').addEventListener('submit', async (event) => {
+      event.preventDefault();
+
+      const username = document.getElementById('username').value.trim();
+      const password = document.getElementById('password').value;
+
+      if (!username || !password) {
+        showMessage('Please enter both username and password.');
+        return;
+      }
+
+      try {
+        showMessage('Logging in...', false);
+        await loginUser(username, password);
+        window.location.href = '/index.html';
+      } catch (error) {
+        showMessage(error.message || 'Invalid username or password.');
+      }
+    });
+  </script>
+</body>
+</html>
