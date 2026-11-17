@@ -4,13 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Green Finance | Executive Login</title>
+  <link rel="icon" type="image/svg+xml" href="/logo.svg">
   <link rel="stylesheet" href="style.css">
 </head>
 <body class="login-body">
   <div class="login-shell">
     <div class="login-card">
       <div class="login-brand">
-        <div class="login-logo">L</div>
+        <div class="login-logo"><img src="/logo.svg" alt=""></div>
         <div>
           <small>Green Finance</small>
           <h1>Executive Login</h1>
@@ -84,7 +85,10 @@
         await loginUser(username, password);
         window.location.href = '/index.html';
       } catch (error) {
-        showMessage(error.message || 'Invalid username or password.');
+        const message = error instanceof TypeError && /fetch/i.test(error.message || '')
+          ? 'Unable to reach the Green Finance server. Please make sure npm run dev is running and open http://localhost:3000/login.'
+          : (error.message || 'Invalid username or password.');
+        showMessage(message);
       }
     });
   </script>

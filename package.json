@@ -6,13 +6,19 @@
   "scripts": {
     "build": "node scripts/build.js",
     "build:windows": "node scripts/build-windows.js",
+    "build:apk": "npx cap sync android && cd android && gradlew.bat assembleDebug",
     "start": "node server.js",
     "dev": "node --watch server.js"
   },
   "dependencies": {
+    "@capacitor/android": "^7.4.3",
+    "@capacitor/core": "^7.4.3",
     "dotenv": "^16.6.1",
     "express": "^5.1.0",
     "mssql": "^11.0.1"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^7.4.3"
   },
   "optionalDependencies": {
     "msnodesqlv8": "^4.4.0"

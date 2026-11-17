@@ -11,7 +11,7 @@ if not exist node_modules (
 )
 echo.
 echo Starting Green Finance...
-echo Open http://localhost:3000 in your browser.
+echo Open http://localhost:3001 in your browser.
 echo.
 call npm run dev
 goto :eof

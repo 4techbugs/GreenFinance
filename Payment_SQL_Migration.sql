@@ -53,9 +53,6 @@ BEGIN
         modified_date DATETIME2 NULL
     );
 
-    CREATE UNIQUE INDEX UX_tb_loan_payment_loan_day
-        ON dbo.tb_loan_payment(loan_id, day_number);
-
     CREATE INDEX IX_tb_loan_payment_loan_date
         ON dbo.tb_loan_payment(loan_id, payment_date);
 END;

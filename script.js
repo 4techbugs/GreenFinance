@@ -9,7 +9,8 @@ const K = {
   w: "la_wallet",
   h: "la_history",
   profiles: "gf_profiles",
-  loans: "la_add_loans"
+  loans: "la_add_loans",
+  transactions: "la_transactions"
 };
 
 const $ = s => document.querySelector(s);
@@ -22,6 +23,7 @@ const DB_KEYS = [
   "la_merged","la_wallet","la_history","gf_profiles","la_add_loans"
 ];
 let DB_ONLINE = false;
+let profilesLoadedFromServer = false;
 const SYNC_QUEUE = Object.create(null);
 
 const hasData = k => Object.prototype.hasOwnProperty.call(APP_DATA, k);
@@ -43,12 +45,36 @@ function normalizeExecutiveRow(row = {}) {
     password: row.password ?? row.password_value ?? "",
     joining: joining ? new Date(joining).toISOString().slice(0, 10) : "",
     status,
+    role: String(row.role ?? row.Role ?? "Executive").trim() || "Executive",
     photo: row.photo ?? row.self_image ?? row.photo_data ?? null
   };
 }
 
 function normalizeExecutiveList(list = []) {
   return Array.isArray(list) ? list.map(normalizeExecutiveRow) : [];
+}
+
+function parseProfileValue(value) {
+  let parsed = value;
+  for (let i = 0; i < 2 && typeof parsed === "string"; i += 1) {
+    try {
+      parsed = JSON.parse(parsed);
+    } catch (error) {
+      break;
+    }
+  }
+  return parsed;
+}
+
+function normalizeProfileContacts(value) {
+  const parsed = parseProfileValue(value);
+  const contacts = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.contacts) ? parsed.contacts : []);
+  return contacts.filter(contact => contact && typeof contact === "object").map(contact => ({
+    ...contact,
+    name: contact.name ?? contact.contact_name ?? contact.full_name ?? "",
+    relation: contact.relation ?? contact.relationship ?? "",
+    phone: contact.phone ?? contact.phone_number ?? contact.contact_number ?? ""
+  }));
 }
 
 function normalizeProfileList(list = []) {
@@ -58,10 +84,10 @@ function normalizeProfileList(list = []) {
     id: String(item.id ?? item.profile_id ?? ""),
     workPlace: item.workPlace ?? item.work_place ?? "",
     officePhone: item.officePhone ?? item.office_phone ?? "",
-    aadhaarProof: item.aadhaarProof ?? item.aadhaar_proof ?? null,
-    panProof: item.panProof ?? item.pan_proof ?? null,
-    selfImage: item.selfImage ?? item.self_image ?? null,
-    otherContacts: Array.isArray(item.otherContacts) ? item.otherContacts : (Array.isArray(item.other_contacts) ? item.other_contacts : [])
+    aadhaarProof: parseProfileValue(item.aadhaarProof ?? item.aadhaar_proof ?? null),
+    panProof: parseProfileValue(item.panProof ?? item.pan_proof ?? null),
+    selfImage: parseProfileValue(item.selfImage ?? item.self_image ?? null),
+    otherContacts: normalizeProfileContacts(item.otherContacts ?? item.other_contacts ?? [])
   }));
 }
 
@@ -126,6 +152,9 @@ function normalizeLoanList(list = []) {
     startDate: item.startDate ?? item.start_date ?? "",
     endDate: item.endDate ?? item.end_date ?? "",
     executive: item.executive ?? "",
+    assignedExecutiveId: item.assignedExecutiveId ?? item.assigned_executive_id ?? null,
+    executive2Id: item.executive2Id ?? item.executive_2_id ?? null,
+    executive3Id: item.executive3Id ?? item.executive_3_id ?? null,
     status: item.status ?? item.loan_status ?? "Active",
     savedAt: item.savedAt ?? item.saved_at ?? null
   }));
@@ -144,7 +173,7 @@ function normalizePrefixList(list = []) {
 }
 
 async function refreshPrefixLoansFromServer() {
-  const response = await fetch('/api/prefix-loans');
+  const response = await apiFetch('/api/prefix-loans');
   if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || 'Prefix Loan fetch failed');
   const payload = await response.json();
   const rows = normalizePrefixList(payload.data || []);
@@ -153,7 +182,7 @@ async function refreshPrefixLoansFromServer() {
 }
 
 async function savePrefixLoanToServer(loan, id = '') {
-  const response = await fetch(id ? `/api/prefix-loans/${encodeURIComponent(id)}` : '/api/prefix-loans', {
+  const response = await apiFetch(id ? `/api/prefix-loans/${encodeURIComponent(id)}` : '/api/prefix-loans', {
     method: id ? 'PUT' : 'POST',
     headers: {'Content-Type':'application/json'},
     body: JSON.stringify({...loan, legacyId: id || loan.legacyId || ''})
@@ -167,7 +196,7 @@ async function deletePrefixLoan(id) {
   if (!confirm('Delete this Prefix Loan?')) return;
   try {
     if (DB_ONLINE) {
-      const response = await fetch(`/api/prefix-loans/${encodeURIComponent(id)}`, {method:'DELETE'});
+      const response = await apiFetch(`/api/prefix-loans/${encodeURIComponent(id)}`, {method:'DELETE'});
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.error || 'Unable to delete Prefix Loan');
     }
@@ -194,7 +223,7 @@ async function syncProfileFiles() {
 
 async function refreshProfilesFromServer() {
   try {
-    const response = await fetch("/api/profiles");
+    const response = await apiFetch("/api/profiles");
     if (!response.ok) {
       throw new Error("Profile fetch failed");
     }
@@ -203,6 +232,7 @@ async function refreshProfilesFromServer() {
     const source = Array.isArray(payload) ? payload : (Array.isArray(payload.data) ? payload.data : (Array.isArray(payload.rows) ? payload.rows : []));
     const rows = normalizeProfileList(source);
     APP_DATA[K.profiles] = rows;
+    profilesLoadedFromServer = true;
     hydrateLoanApplicantNames();
     return rows;
   } catch (error) {
@@ -213,7 +243,7 @@ async function refreshProfilesFromServer() {
 
 async function bootstrapDatabase() {
   try {
-    const response = await fetch("/api/bootstrap");
+    const response = await apiFetch("/api/bootstrap");
     if (!response.ok) {
       throw new Error("Database bootstrap failed");
     }
@@ -234,6 +264,8 @@ async function bootstrapDatabase() {
         APP_DATA[key] = data[key];
       }
     }
+    profilesLoadedFromServer = Object.prototype.hasOwnProperty.call(data, "gf_profiles");
+    if (profilesLoadedFromServer) hydrateLoanApplicantNames();
 
     if (!hasData(K.p)) {
       APP_DATA[K.p] = [];
@@ -262,19 +294,8 @@ async function bootstrapDatabase() {
     if (!hasData(K.profiles) || !Array.isArray(get(K.profiles))) put(K.profiles, []);
     if (!hasData(K.w)) put(K.w, {});
     if (!hasData(K.h)) put(K.h, []);
+    if (!hasData(K.transactions)) put(K.transactions, []);
 
-    await refreshProfilesFromServer();
-    if (DB_ONLINE) {
-      try {
-        const execResponse = await fetch("/api/executives");
-        if (execResponse.ok) {
-          const execPayload = await execResponse.json().catch(() => ({}));
-          APP_DATA[K.e] = normalizeExecutiveList(execPayload.data || []);
-        }
-      } catch (e) {
-        console.warn("Unable to refresh executives from SQL Server", e);
-      }
-    }
     console.log("Green Finance connected to SQL Server");
   } catch (error) {
     DB_ONLINE = false;
@@ -344,13 +365,37 @@ function getSession() {
 function setSession(user) {
   localStorage.setItem(AUTH_KEY, JSON.stringify(user));
 }
+function apiFetch(input, init = {}) {
+  const session = getSession();
+  const headers = new Headers(init.headers || {});
+  if (session?.id) headers.set("x-executive-id", String(session.id));
+  if (session?.username) headers.set("x-executive-username", String(session.username));
+  return fetch(input, { ...init, headers });
+}
+
+function isAdminUser() {
+  return String(getSession()?.role || "").toLowerCase() === "admin";
+}
+function isExecutiveUser() { return !isAdminUser() && !!getSession(); }
+function applyRolePermissions() {
+  const admin = isAdminUser();
+  all('nav a').forEach(a => {
+    const page = a.dataset.p;
+    const hide = !admin && ['executives','prefix','closeinactive'].includes(page);
+    a.style.display = hide ? 'none' : '';
+  });
+  const badgeEl = document.querySelector('header .admin');
+  if (badgeEl) { const s=getSession(); badgeEl.innerHTML = `${admin ? 'AD' : 'EX'} <b>${esc(s?.name || (admin ? 'Admin' : 'Executive'))}</b>`; }
+}
+
+
 
 function clearSession() {
   localStorage.removeItem(AUTH_KEY);
 }
 
 async function loginWithExecutive(username, password) {
-  const response = await fetch("/api/login", {
+  const response = await apiFetch("/api/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ username, password })
@@ -366,6 +411,8 @@ async function loginWithExecutive(username, password) {
 }
 
 function showLoginScreen() {
+  window.location.replace("/login");
+  return;
   const app = document.getElementById("app");
   if (!app) return;
 
@@ -398,6 +445,7 @@ function showLoginScreen() {
     try {
       const user = await loginWithExecutive(username, password);
       toast(`Welcome ${user.name}`);
+      applyRolePermissions();
       document.querySelector("aside").style.display = "";
       document.querySelector("main header").style.display = "";
       bootstrapDatabase().finally(() => render());
@@ -410,6 +458,13 @@ function showLoginScreen() {
   const header = document.querySelector("main header");
   if (side) side.style.display = "none";
   if (header) header.style.display = "none";
+}
+
+function togglePasswordVisibility(id, button) {
+  const input = document.getElementById(id);
+  if (!input) return;
+  input.type = input.type === "password" ? "text" : "password";
+  if (button) button.textContent = input.type === "password" ? "👁" : "🙈";
 }
 
 function dateAdd(d, n) {
@@ -477,10 +532,34 @@ function downloadStoredFile(fileMeta, fallbackName = "document") {
   link.click();
   link.remove();
 }
-function downloadProfileProof(profileId, key) {
+async function downloadProfileProof(profileId, key) {
   const profile = findProfileById(profileId);
   const fileMeta = profile?.[key];
-  downloadStoredFile(fileMeta, key === "aadhaarProof" ? "Aadhaar-Proof" : "PAN-Proof");
+  const dataUrl = typeof fileMeta === "string" ? fileMeta : fileMeta?.dataUrl;
+  if (dataUrl) {
+    downloadStoredFile(typeof fileMeta === "string" ? { dataUrl } : fileMeta, key === "aadhaarProof" ? "Aadhaar-Proof" : "PAN-Proof");
+    return;
+  }
+  if (!DB_ONLINE) return toast("Document data is not available.");
+
+  try {
+    const response = await apiFetch(`/api/profile-file/${encodeURIComponent(profileId)}/${encodeURIComponent(key)}`);
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.error || "Unable to download profile document.");
+    }
+    const url = URL.createObjectURL(await response.blob());
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = fileMeta?.name || (key === "aadhaarProof" ? "Aadhaar-Proof" : "PAN-Proof");
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (error) {
+    console.error(error);
+    toast(error.message || "Unable to download profile document.");
+  }
 }
 
 // UI Helpers
@@ -495,7 +574,7 @@ function sel(l, n, a, v) { return `<div class="field"><label>${l}</label><select
 function person(p, x, g = false) { return [["Full Name", "name"], ["Age", "age"], ["Phone Number", "phone"], ["Email", "email"], ["Aadhaar Number", "aadhaar"], ["PAN Number", "pan"], ["Address", "address"], ["Occupation", "occupation"], ...(g ? [["Relationship with Customer", "relationship"]] : [])].map(([l, n]) => field(l, p + n, x[n] || "")).join(""); }
 
 function formFields(x = {}, g = {}, id) {
-  let exs = get(K.e).map(e => `<option ${e.name === x.executive ? "selected" : ""}>${esc(e.name)}</option>`).join("");
+  let exs = get(K.e).filter(e => String(e.status || 'Active').toLowerCase() === 'active' && !['NRE', 'FAMILY'].includes(String(e.role || '').trim().toUpperCase())).map(e => `<option ${e.name === x.executive ? "selected" : ""}>${esc(e.name)}</option>`).join("");
   return `<form id="customerForm" class="form"><div class="grid"><div class="title">Loan Details</div>${field("Loan ID", "loanId", x.loanId || "")}${field("Customer Name", "name", x.name || "")}${sel("Loan Type", "loanType", types, x.loanType)}${num("Loan Amount", "amount", x.amount)}${num("Repay Amount", "repay", x.repay)}${num("Tenure (Days)", "tenure", x.tenure)}${num("EMI", "emi", x.emi)}${field("Loan Approval Date", "approval", x.approval || "", "date")}${field("First EMI Date", "firstEmi", x.firstEmi || "", "date")}${field("Last EMI Date", "lastEmi", x.lastEmi || "", "date")}${sel("Loan Status", "status", ["Active", "Inactive", "Merged"], x.status)}<div class="field"><label>Assigned Executive</label><select name="executive"><option>Select Executive</option>${exs}</select></div>${field("Remarks", "remarks", x.remarks || "", "text", true)}<div class="title">Customer Details</div>${person("customer", x)}<div class="title">Guarantor Details</div>${person("guarantor", g, true)}</div><div class="formfoot"><button type="button" class="btn secondary close">Cancel</button><button class="btn primary">Save Customer</button></div></form>`;
 }
 
@@ -800,7 +879,7 @@ function bindProfileDrawer(id, initialCount) {
 
       const nextProfiles = id ? replaceProfileById(id, profile) : [...profiles, profile];
       if (DB_ONLINE) {
-        const response = await fetch(id ? `/api/profiles/${encodeURIComponent(id)}` : "/api/profiles", {
+        const response = await apiFetch(id ? `/api/profiles/${encodeURIComponent(id)}` : "/api/profiles", {
           method: id ? "PUT" : "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(profile)
@@ -830,26 +909,83 @@ function bindProfileDrawer(id, initialCount) {
   updateContactLimit();
 }
 
+function profileFileEndpoint(profileId, key) {
+  return `/api/profile-file/${encodeURIComponent(profileId)}/${encodeURIComponent(key)}`;
+}
+
+function isProfileImage(file) {
+  const type = typeof file === "object" ? String(file?.type || "") : "";
+  const name = typeof file === "object" ? String(file?.name || "") : "";
+  return (typeof file === "string" && /^data:image\//i.test(file)) ||
+    type.toLowerCase().startsWith("image/") ||
+    /\.(jpe?g|png|gif|webp|bmp|jfif|heic|heif)$/i.test(name);
+}
+
+function profileFileImageSource(file) {
+  const dataUrl = typeof file === "string" ? file : file?.dataUrl;
+  if (typeof dataUrl === "string" && /^data:image\//i.test(dataUrl)) return dataUrl;
+  return "";
+}
+
+function profileFileImageAttributes(profileId, key, file) {
+  const source = profileFileImageSource(file);
+  if (source) return `src="${esc(source)}"`;
+  return DB_ONLINE && profileId && file
+    ? `data-profile-file-url="${esc(profileFileEndpoint(profileId, key))}"`
+    : "";
+}
+
+function hydrateProfileViewImages() {
+  all("#modal img[data-profile-file-url]").forEach(async image => {
+    try {
+      const response = await apiFetch(image.dataset.profileFileUrl);
+      if (!response.ok) throw new Error("Unable to load profile image.");
+      const blob = await response.blob();
+      if (!blob.type.startsWith("image/")) throw new Error("Stored profile file is not an image.");
+      image.src = URL.createObjectURL(blob);
+    } catch (error) {
+      console.error(error);
+      image.hidden = true;
+    }
+  });
+}
+
+function profileProofMarkup(profile, key, label) {
+  const file = profile[key];
+  if (!file) return `<div><label>${label}</label><b>Not uploaded</b></div>`;
+  const imageAttributes = isProfileImage(file) ? profileFileImageAttributes(profile.id, key, file) : "";
+  const name = typeof file === "object" ? (file.name || label) : label;
+  return `<div class="profile-document-field"><label>${label}</label><b>${esc(name)}</b>
+    ${imageAttributes ? `<img class="profile-proof-preview" ${imageAttributes} alt="${esc(label)}">` : ""}
+    <button type="button" class="btn secondary proof-download" onclick='downloadProfileProof(${JSON.stringify(String(profile.id))}, "${key}")'>Download</button></div>`;
+}
+
+function profileViewSections(profile) {
+  const contacts = normalizeProfileContacts(profile.otherContacts ?? profile.other_contacts ?? []);
+  const contactMarkup = contacts.map(contact =>
+    `<div class="profile-contact-view"><b>${esc(contact.name)}</b><span>${esc(contact.relation)}</span><span>${esc(contact.phone)}</span></div>`).join("");
+  const hasDocuments = profile.aadhaarProof || profile.panProof || profile.selfImage;
+  const selfImageAttributes = profile.selfImage ? profileFileImageAttributes(profile.id, "selfImage", profile.selfImage) : "";
+  return `
+    ${hasDocuments ? `<div class="profile-view-section"><h3>Uploaded Documents</h3><div class="profile-view-grid">
+      ${profileProofMarkup(profile, "aadhaarProof", "Aadhaar Proof")}
+      ${profileProofMarkup(profile, "panProof", "PAN Proof")}
+      <div class="profile-self-image-field"><label>Self Image</label>${selfImageAttributes ? `<img class="profile-self-image" ${selfImageAttributes} alt="${esc(profile.name || "Profile")} Self Image">` : `<b>Not uploaded</b>`}</div>
+    </div></div>` : ""}
+    <div class="profile-view-section"><h3>Other Contact (${contacts.length})</h3>${contactMarkup || '<div class="empty-contact">No other contacts added.</div>'}</div>`;
+}
+
 function viewProfile(id) {
   const x = findProfileById(id);
   if (!x) return;
-  const contacts = (x.otherContacts||[]).map(c =>
-    `<div class="profile-contact-view"><b>${esc(c.name)}</b><span>${esc(c.relation)}</span><span>${esc(c.phone)}</span></div>`).join("");
-  const image = x.selfImage?.dataUrl || "";
-  const proofInfo = (x.aadhaarProof || x.panProof || image) ? `
-    <div class="profile-view-section"><h3>Uploaded Documents</h3><div class="profile-view-grid">
-      <div><label>Aadhaar Proof</label>${x.aadhaarProof ? `<b>${esc(x.aadhaarProof.name || "Aadhaar Proof")}</b><button type="button" class="btn secondary proof-download" onclick='downloadProfileProof(${JSON.stringify(x.id)}, "aadhaarProof")'>Download</button>` : `<b>Not uploaded</b>`}</div>
-      <div><label>PAN Proof</label>${x.panProof ? `<b>${esc(x.panProof.name || "PAN Proof")}</b><button type="button" class="btn secondary proof-download" onclick='downloadProfileProof(${JSON.stringify(x.id)}, "panProof")'>Download</button>` : `<b>Not uploaded</b>`}</div>
-      <div class="profile-self-image-field"><label>Self Image</label>${image ? `<img class="profile-self-image" src="${esc(image)}" alt="${esc(x.name || "Profile")} Self Image">` : `<b>Not uploaded</b>`}</div>
-    </div></div>` : "";
   modal(`<div class="mhead"><div><div class="ey">Profile / Master</div><h2>Profile Details</h2></div><button class="close">×</button></div>
     <div class="profile-view">
       <div class="profile-view-section"><h3>Personal Details</h3><div class="profile-view-grid">
         ${[["Name",x.name],["Age",x.age],["Contact Number",x.phone],["Email",x.email],["Address",x.address],["Work",x.work],["Work Place",x.workPlace],["Office Contact Number",x.officePhone],["Aadhaar No.",x.aadhaar],["PAN No.",x.pan]].map(a=>`<div><label>${a[0]}</label><b>${esc(a[1] || "—")}</b></div>`).join("")}
       </div></div>
-      ${proofInfo}
-      <div class="profile-view-section"><h3>Other Contact (${contacts.length})</h3>${contacts || '<div class="empty-contact">No other contacts added.</div>'}</div>
+      ${profileViewSections(x)}
     </div><div class="foot"><button class="btn secondary close">Close</button></div>`);
+  hydrateProfileViewImages();
 }
 
 async function deleteProfile(id) {
@@ -860,7 +996,7 @@ async function deleteProfile(id) {
 
   try {
     if (DB_ONLINE) {
-      const response = await fetch(`/api/profiles/${encodeURIComponent(id)}`, { method: "DELETE" });
+      const response = await apiFetch(`/api/profiles/${encodeURIComponent(id)}`, { method: "DELETE" });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.error || "Unable to delete profile");
     }
@@ -880,9 +1016,9 @@ function renderProfiles() {
     <td>${i+1}</td><td><b>${esc(x.name)}</b></td><td>${esc(x.phone)}</td><td>${esc(x.email)}</td>
     <td>${esc(x.age)}</td><td>${esc(x.work)}</td><td>${esc(x.workPlace)}</td>
     <td><div class="actions">
-      <button class="btn secondary" onclick="viewProfile('${esc(String(x.id ?? ""))}')">View</button>
+      <button class="btn secondary" onclick="viewProfile('${esc(String(x.id ?? ""))}')">View</button>${isAdminUser() ? `
       <button class="btn secondary" onclick="profileDrawer('${esc(String(x.id ?? ""))}')">Edit</button>
-      <button class="btn danger" onclick="deleteProfile('${esc(String(x.id ?? ""))}')">Delete</button>
+      <button class="btn danger" onclick="deleteProfile('${esc(String(x.id ?? ""))}')">Delete</button>` : ""}
     </div></td>
   </tr>`).join("");
 
@@ -899,19 +1035,259 @@ function renderProfiles() {
     </div>`;
 }
 
+let showInactiveExecutives = false;
+
 // Render Main App Views
-function render(p = "dashboard") {
-  all("nav a").forEach(a => a.classList.toggle("active", a.dataset.p === p));
+async function refreshTransactionAccounts() {
+  const response = await apiFetch("/api/transaction-accounts");
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || "Unable to load transaction accounts.");
+  return Array.isArray(payload.data) ? payload.data : [];
+}
+
+async function refreshTransactionsFromServer() {
+  const response = await apiFetch("/api/transactions");
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || "Unable to load transactions.");
+  const rows = Array.isArray(payload.data) ? payload.data : [];
+  APP_DATA[K.transactions] = rows;
+  return rows;
+}
+
+function transactionAccountLabel(account) {
+  if (!account) return "—";
+  const role = String(account.role || "").toUpperCase() === "NRE" ? "Family" : String(account.role || "");
+  return `${account.name || "Unknown"}${role ? ` (${role})` : ""}`;
+}
+
+async function newTransactionForm() {
+  try {
+    const accounts = await refreshTransactionAccounts();
+    const session = getSession();
+    const admin = isAdminUser();
+    const today = new Date().toISOString().slice(0, 10);
+    if (!accounts.length) return toast("No active accounts found in the connected database. Check /api/health and DB_DATABASE.");
+
+    const options = accounts.map(a => `<option value="${esc(a.id)}">${esc(transactionAccountLabel(a))}</option>`).join("");
+    const own = accounts.find(a => Number(a.id) === Number(session?.id));
+    if (!admin && !own) return toast("Your active account was not found.");
+
+    modal(`<div class="mhead"><div><div class="ey">Transaction Management</div><h2>New Transaction</h2></div><button class="close">×</button></div>
+      <form class="form transaction-form" id="transactionForm">
+        <div class="grid">
+          <div class="field"><label>From A/C</label>
+            ${admin
+              ? `<select name="fromAc" required><option value="">Select From A/C</option>${options}</select>`
+              : `<select name="fromAc" required disabled><option value="${esc(own.id)}" selected>${esc(transactionAccountLabel(own))}</option></select><input type="hidden" name="fromAcFixed" value="${esc(own.id)}">`}
+          </div>
+          <div class="field"><label>To A/C</label><select name="toAc" required><option value="">Select To A/C</option>${options}</select></div>
+          <div class="field full"><label>Remark</label><textarea name="remark" rows="3" placeholder="Enter transaction remark"></textarea></div>
+          <div class="field"><label>Amount</label><input type="number" name="amount" min="0.01" step="0.01" placeholder="Enter amount" required></div>
+          <div class="field"><label>Date</label><input type="date" name="date" value="${today}" required></div>
+        </div>
+        <div class="formfoot"><button type="button" class="btn secondary close">Cancel</button><button type="submit" class="btn primary">Submit Transaction</button></div>
+      </form>`);
+
+    const form = $("#transactionForm");
+    if (!form) return;
+    form.onsubmit = async event => {
+      event.preventDefault();
+      const fd = new FormData(form);
+      const fromAc = admin ? String(fd.get("fromAc") || "") : String(fd.get("fromAcFixed") || "");
+      const toAc = String(fd.get("toAc") || "");
+      const amount = Number(fd.get("amount") || 0);
+      const date = String(fd.get("date") || "");
+      const remark = String(fd.get("remark") || "").trim();
+      if (!fromAc || !toAc) return toast("Select From A/C and To A/C.");
+      if (!date) return toast("Select transaction date.");
+      if (!(amount > 0)) return toast("Enter a valid amount.");
+      try {
+        const response = await apiFetch("/api/transactions", {
+          method: "POST",
+          headers: {"Content-Type":"application/json"},
+          body: JSON.stringify({ fromAc: Number(fromAc), toAc: Number(toAc), amount, date, remark })
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.error || "Unable to save transaction.");
+        close();
+        await refreshTransactionsFromServer();
+        render("transactions");
+        toast("Transaction saved successfully");
+      } catch (error) {
+        console.error(error);
+        toast(error.message || "Unable to save transaction.");
+      }
+    };
+  } catch (error) {
+    console.error(error);
+    toast(error.message || "Unable to load transaction accounts.");
+  }
+}
+
+// Report pages always load real SQL records; no demo or localStorage fallback.
+function reportDate(value) {
+  if (!value) return "—";
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? esc(value) : d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+}
+function reportMoney(value) { return money(Number(value || 0)); }
+async function loadReportAccounts() {
+  const root = $("#app");
+  if (!root) return;
+  root.innerHTML = `<div class="report-page-shell">${head("Reports", "Account Statements")}<div class="card"><div class="empty-state" style="padding:28px;text-align:center;color:#77869a">Loading accounts from SQL Server...</div></div></div>`;
+  try {
+    const response = await apiFetch("/api/reports/accounts");
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || "Unable to load report accounts.");
+    const rows = (payload.data || []).map(account => `<tr><td>${esc(account.id)}</td><td><b>${esc(account.name || "—")}</b></td><td>${esc(account.role || "Executive")}</td><td>${badge(account.status || "Active")}</td><td><button class="btn primary" onclick="openAccountStatement(${Number(account.id)})">View Statement</button></td></tr>`).join("");
+    root.innerHTML = `<div class="report-page-shell">${head("Reports", "Account Statements")}${tableCard("All Accounts", ["Account ID", "Name", "Role", "Status", "Action"], rows || `<tr><td colspan="5" class="empty-table">No SQL accounts found.</td></tr>`, "reportAccountsTable")}</div>`;
+    bind();
+    applyCurrentPageSearch();
+  } catch (error) {
+    root.innerHTML = `<div class="report-page-shell">${head("Reports", "Account Statements")}<div class="card" style="padding:24px"><b>Unable to load reports</b><p>${esc(error.message || "Unknown error")}</p><button class="btn secondary" onclick="loadReportAccounts()">Retry</button></div></div>`;
+  }
+}
+async function openAccountStatement(accountId) {
+  const root = $("#app");
+  if (!root) return;
+  root.innerHTML = `<div class="report-page-shell">${head("Reports", "Account Statement", `<button class="btn secondary" onclick="loadReportAccounts()">← All Accounts</button>`)}<div class="card"><div class="empty-state" style="padding:28px;text-align:center;color:#77869a">Loading statement from SQL Server...</div></div></div>`;
+  try {
+    const response = await apiFetch(`/api/reports/accounts/${encodeURIComponent(accountId)}/statement`);
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || "Unable to load statement.");
+    const account = payload.account || {};
+    let balance = Number(payload.openingBalance || 0);
+    const rows = (payload.entries || []).map(entry => {
+      balance = Number(entry.balance || 0);
+      return `<tr><td>${reportDate(entry.date)}</td><td>${esc(entry.name || "—")}</td><td>${esc(entry.entry || "Payment")}</td><td class="amount-negative">${entry.dr ? reportMoney(entry.dr) : "—"}</td><td class="amount-positive">${entry.cr ? reportMoney(entry.cr) : "—"}</td><td><b>${reportMoney(balance)}</b></td></tr>`;
+    }).join("");
+    const openingDate = payload.openingDate ? `<span>Opening date: <b>${reportDate(payload.openingDate)}</b></span>` : "";
+    root.innerHTML = `<div class="report-page-shell">${head("Reports", "Account Statement", `<button class="btn secondary" onclick="loadReportAccounts()">← All Accounts</button>`)}<div class="report-account-shell"><div class="report-summary-grid"><div class="report-summary-card"><label>Account</label><strong>${esc(account.name || "—")}</strong><small>${esc(account.role || "Executive")} · ID ${esc(account.id)}</small></div><div class="report-summary-card"><label>Opening Balance</label><strong>${reportMoney(payload.openingBalance)}</strong><small>${openingDate || "Opening balance"}</small></div><div class="report-summary-card"><label>Closing Balance</label><strong>${reportMoney(payload.closingBalance)}</strong><small>Opening + CR − DR</small></div></div><div class="report-table-wrap">${tableCard("Statement", ["Date", "Name", "Entry", "DR (Debit)", "CR (Credit)", "Balance"], rows || `<tr><td colspan="6" class="empty-table">No transactions found for this account.</td></tr>`, "accountStatementTable")}</div></div></div>`;
+    bind();
+    applyCurrentPageSearch();
+  } catch (error) {
+    root.innerHTML = `<div class="report-page-shell">${head("Reports", "Account Statement", `<button class="btn secondary" onclick="loadReportAccounts()">← All Accounts</button>`)}<div class="card" style="padding:24px"><b>Unable to load statement</b><p>${esc(error.message || "Unknown error")}</p><button class="btn secondary" onclick="openAccountStatement(${Number(accountId)})">Retry</button></div></div>`;
+  }
+}
+
+// Render Main App Views
+async function refreshTransactionAccounts() {
+  const response = await apiFetch("/api/transaction-accounts");
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || "Unable to load transaction accounts.");
+  return Array.isArray(payload.data) ? payload.data : [];
+}
+
+async function refreshTransactionsFromServer() {
+  const response = await apiFetch("/api/transactions");
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || "Unable to load transactions.");
+  const rows = Array.isArray(payload.data) ? payload.data : [];
+  APP_DATA[K.transactions] = rows;
+  return rows;
+}
+
+function transactionAccountLabel(account) {
+  if (!account) return "—";
+  const role = String(account.role || "").toUpperCase() === "NRE" ? "Family" : String(account.role || "");
+  return `${account.name || "Unknown"}${role ? ` (${role})` : ""}`;
+}
+
+async function newTransactionForm() {
+  try {
+    const accounts = await refreshTransactionAccounts();
+    const session = getSession();
+    const admin = isAdminUser();
+    const today = new Date().toISOString().slice(0, 10);
+    if (!accounts.length) return toast("No active accounts found in the connected database. Check /api/health and DB_DATABASE.");
+
+    const options = accounts.map(a => `<option value="${esc(a.id)}">${esc(transactionAccountLabel(a))}</option>`).join("");
+    const own = accounts.find(a => Number(a.id) === Number(session?.id));
+    if (!admin && !own) return toast("Your active account was not found.");
+
+    modal(`<div class="mhead"><div><div class="ey">Transaction Management</div><h2>New Transaction</h2></div><button class="close">×</button></div>
+      <form class="form transaction-form" id="transactionForm">
+        <div class="grid">
+          <div class="field"><label>From A/C</label>
+            ${admin
+              ? `<select name="fromAc" required><option value="">Select From A/C</option>${options}</select>`
+              : `<select name="fromAc" required disabled><option value="${esc(own.id)}" selected>${esc(transactionAccountLabel(own))}</option></select><input type="hidden" name="fromAcFixed" value="${esc(own.id)}">`}
+          </div>
+          <div class="field"><label>To A/C</label><select name="toAc" required><option value="">Select To A/C</option>${options}</select></div>
+          <div class="field full"><label>Remark</label><textarea name="remark" rows="3" placeholder="Enter transaction remark"></textarea></div>
+          <div class="field"><label>Amount</label><input type="number" name="amount" min="0.01" step="0.01" placeholder="Enter amount" required></div>
+          <div class="field"><label>Date</label><input type="date" name="date" value="${today}" required></div>
+        </div>
+        <div class="formfoot"><button type="button" class="btn secondary close">Cancel</button><button type="submit" class="btn primary">Submit Transaction</button></div>
+      </form>`);
+
+    const form = $("#transactionForm");
+    if (!form) return;
+    form.onsubmit = async event => {
+      event.preventDefault();
+      const fd = new FormData(form);
+      const fromAc = admin ? String(fd.get("fromAc") || "") : String(fd.get("fromAcFixed") || "");
+      const toAc = String(fd.get("toAc") || "");
+      const amount = Number(fd.get("amount") || 0);
+      const date = String(fd.get("date") || "");
+      const remark = String(fd.get("remark") || "").trim();
+      if (!fromAc || !toAc) return toast("Select From A/C and To A/C.");
+      if (!date) return toast("Select transaction date.");
+      if (!(amount > 0)) return toast("Enter a valid amount.");
+      try {
+        const response = await apiFetch("/api/transactions", {
+          method: "POST",
+          headers: {"Content-Type":"application/json"},
+          body: JSON.stringify({ fromAc: Number(fromAc), toAc: Number(toAc), amount, date, remark })
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.error || "Unable to save transaction.");
+        close();
+        await refreshTransactionsFromServer();
+        render("transactions");
+        toast("Transaction saved successfully");
+      } catch (error) {
+        console.error(error);
+        toast(error.message || "Unable to save transaction.");
+      }
+    };
+  } catch (error) {
+    console.error(error);
+    toast(error.message || "Unable to load transaction accounts.");
+  }
+}
+
+function render(p = "dashboard", fromHistory = false) {
+  const session = getSession();
+  if (!session) return showLoginScreen();
+  if (!isAdminUser() && ["executives","prefix","closeinactive","reports"].includes(p)) p = "addloan";
+  const pageHistoryState = { ...(history.state || {}), loanPortalPage: p };
+  if (fromHistory) {
+    history.replaceState(pageHistoryState, "", location.href);
+  } else if (history.state?.loanPortalPage !== p) {
+    if (!history.state?.loanPortalPage) history.replaceState(pageHistoryState, "", location.href);
+    else history.pushState(pageHistoryState, "", location.href);
+  }
+  all("nav a").forEach(a => {
+    const active = a.dataset.p === p;
+    a.classList.toggle("active", active);
+    if (active) a.setAttribute("aria-current", "page");
+    else a.removeAttribute("aria-current");
+  });
   let h = "";
   let c = get(K.c), a = get(K.a), e = get(K.e), r = get(K.r), w = get(K.w), hist = get(K.h);
 
   if (p === "profiles") {
-    if (DB_ONLINE) {
+    if (DB_ONLINE && !profilesLoadedFromServer) {
       const currentRows = get(K.profiles);
       if (!currentRows.length) {
         refreshProfilesFromServer().then(() => {
           const appRoot = document.getElementById("app");
-          if (appRoot) appRoot.innerHTML = renderProfiles();
+          if (appRoot) {
+            appRoot.innerHTML = renderProfiles();
+            bind();
+            applyCurrentPageSearch();
+          }
         });
         return;
       }
@@ -921,21 +1297,59 @@ function render(p = "dashboard") {
   }
 
   if (p === "dashboard") {
-    let active = c.filter(x => x.status === "Active").length;
-    let totalCollected = Object.values(w).reduce((acc, curr) => acc + (curr.collected || 0), 0);
-    let totalSubmitted = Object.values(w).reduce((acc, curr) => acc + (curr.submitted || 0), 0);
-    let inHandCash = totalCollected - totalSubmitted;
+    const allLoans = Array.isArray(get(K.loans)) ? get(K.loans) : [];
+    const dashboardLoans = isExecutiveUser()
+      ? allLoans.filter(loan =>
+          Number(loan.assignedExecutiveId) === Number(session.id) ||
+          Number(loan.executive2Id) === Number(session.id) ||
+          Number(loan.executive3Id) === Number(session.id) ||
+          String(loan.executive || "").trim().toLowerCase() === String(session.name || "").trim().toLowerCase())
+      : allLoans;
+    const activeLoans = dashboardLoans.filter(loan => String(loan.status || "Active").toLowerCase() === "active");
+    const closedLoans = dashboardLoans.filter(loan => ["closed", "inactive"].includes(String(loan.status || "").toLowerCase()));
+    const activeLoanValue = activeLoans.reduce((total, loan) => total + Number(loan.loanAmount || 0), 0);
+    const scheduledRepayment = activeLoans.reduce((total, loan) => total + Number(loan.repayAmount || 0), 0);
+    const walletRows = isAdminUser()
+      ? Object.values(w)
+      : [w[session.name] || { collected: 0, submitted: 0 }];
+    const totalCollected = walletRows.reduce((total, wallet) => total + Number(wallet?.collected || 0), 0);
+    const totalSubmitted = walletRows.reduce((total, wallet) => total + Number(wallet?.submitted || 0), 0);
+    const inHandCash = totalCollected - totalSubmitted;
+    const recentLoans = dashboardLoans.slice().sort((left, right) =>
+      (Date.parse(right.savedAt || "") || 0) - (Date.parse(left.savedAt || "") || 0)
+    ).slice(0, 5);
+    const recentLoanRows = recentLoans.map(loan => {
+      const applicant = resolveProfileObject(loan.applicant);
+      const executives = loanExecutiveNames(loan) || loan.executive || "—";
+      return `<div class="dashboard-loan-row">
+        <div><b>${esc(applicant?.name || "—")}</b><small>Loan ${esc(loan.id)}</small></div>
+        <div><b>${money(loan.loanAmount)}</b><small>${esc(loan.tenure || 0)} days</small></div>
+        <div><b>${esc(executives)}</b><small>${esc(loan.status || "Active")}</small></div>
+        <button class="btn secondary" onclick="viewAddLoan('${esc(String(loan.id))}')">View</button>
+      </div>`;
+    }).join("");
+    const quickActions = isAdminUser()
+      ? `<button onclick="addLoanForm()">＋ Create Loan</button><button onclick="render('profiles')">Manage Profiles</button><button onclick="render('reports')">View Reports</button>`
+      : `<button onclick="render('addloan')">View My Assigned Loans</button><button onclick="render('profiles')">View Profiles</button>`;
+    const greeting = isAdminUser() ? "Loan Administration" : `Welcome, ${esc(session.name || "Executive")}`;
 
     h = head("Dashboard", "Loan Management") +
-      `<div class="welcome card"><div><div class="ey">Loan Administration</div><h2>Welcome to Loan Management Dashboard</h2><p>Monitor customers, executive collections, and wallet history.</p></div><div class="dash-date">${new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}</div></div>
-       <div class="stats">
-         <div class="card stat"><span>Total Customers</span><strong>${c.length}</strong><small>${active} active accounts</small></div>
-         <div class="card stat"><span>Total Collected</span><strong>${money(totalCollected)}</strong><small>By all executives</small></div>
-         <div class="card stat"><span>Received by Admin</span><strong>${money(totalSubmitted)}</strong><small>Handed over cash</small></div>
-         <div class="card stat"><span>Pending Cash in Hand</span><strong>${money(inHandCash)}</strong><small>With executives</small></div>
+      `<div class="welcome card"><div><div class="ey">${greeting}</div><h2>Loan Operations Overview</h2><p>Track loan creation, repayments, assignments, and cash handovers.</p></div><div class="dash-date">${new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}</div></div>
+       <div class="stats dashboard-stats">
+         <div class="card stat"><span>Total Customers</span><strong>${c.length}</strong><small>Customer records</small></div>
+         <div class="card stat"><span>Active Loans</span><strong>${activeLoans.length}</strong><small>Loans currently in repayment</small></div>
+         <div class="card stat"><span>Active Loan Value</span><strong>${money(activeLoanValue)}</strong><small>Principal issued</small></div>
+         <div class="card stat"><span>Scheduled Repayment</span><strong>${money(scheduledRepayment)}</strong><small>Repay amount for active loans</small></div>
+         <div class="card stat"><span>Closed / Inactive</span><strong>${closedLoans.length}</strong><small>Completed or inactive loans</small></div>
+         <div class="card stat"><span>Total Collected</span><strong>${money(totalCollected)}</strong><small>${isAdminUser() ? "Across all executives" : "Collected by you"}</small></div>
+         <div class="card stat"><span>Received by Admin</span><strong>${money(totalSubmitted)}</strong><small>Cash handed over${isAdminUser() ? "" : " by you"}</small></div>
+         <div class="card stat"><span>Cash In Hand</span><strong>${money(inHandCash)}</strong><small>${isAdminUser() ? "Pending executive handover" : "Pending your handover"}</small></div>
        </div>
-       <div class="dash-grid">
-         <div class="card dash-card"><div class="dash-title"><b>Quick Actions</b><span>Manage Portal</span></div><div class="quick-actions"><button onclick="render('customers')">Manage Customers</button><button onclick="render('wallet')">Executive Wallet</button><button onclick="render('executives')">Executive Team</button><button onclick="render('applications')">Loan Applications</button></div></div>
+       <div class="dashboard-panels">
+         <section class="card dashboard-loans"><div class="dash-title"><b>${isAdminUser() ? "Recent Loans" : "My Assigned Loans"}</b><button class="dashboard-link" onclick="render('addloan')">View all loans</button></div>
+           ${recentLoanRows || `<div class="dashboard-empty">No loans to display yet. ${isAdminUser() ? "Create a loan to get started." : "No loans are currently assigned to you."}</div>`}
+         </section>
+         <section class="card dash-card"><div class="dash-title"><b>Next Steps</b><span>${isAdminUser() ? "Loan workflow" : "Your workspace"}</span></div><div class="quick-actions">${quickActions}</div></section>
        </div>`;
   }
 
@@ -983,8 +1397,12 @@ function render(p = "dashboard") {
   }
 
   if (p === "executives") {
-    let d = get(K.e);
-    h = head("Executive", "Team Management", `<button class="btn primary" onclick="execForm()">＋ Add Executive</button>`) + tableCard("Executive List", ["ID", "Name", "Phone Number", "Status", "Action"], d.map(x => `<tr><td>${x.id}</td><td><b>${esc(x.name)}</b></td><td>${x.phone}</td><td>${badge(x.status)}</td><td><button class="btn secondary" onclick="viewExec('${x.id}')">View</button> <button class="btn secondary" onclick="execForm('${x.id}')">Edit</button> <button class="btn danger" onclick="del(K.e,'${x.id}','executives')">Delete</button></td></tr>`).join(""), "et");
+    if (!isAdminUser()) return render("addloan");
+    const allExecs = get(K.e);
+    const d = showInactiveExecutives ? allExecs : allExecs.filter(x => String(x.status || "Active") === "Active");
+    const toggle = `<label class="status-toggle"><input type="checkbox" ${showInactiveExecutives ? "checked" : ""} onchange="toggleExecutiveStatus(this.checked)"><span></span><b>${showInactiveExecutives ? "Active + Inactive" : "Active Only"}</b></label>`;
+    const rows = d.map(x => `<tr><td>${esc(x.executive_id ?? x.id)}</td><td><b>${esc(x.name)}</b></td><td>${esc(x.phone)}</td><td>${badge(x.status)}</td><td>${esc(x.role || "Executive")}</td><td><button class="btn secondary" onclick="viewExec('${esc(x.id)}')">View</button> <button class="btn secondary" onclick="execForm('${esc(x.id)}')">Edit</button> ${String(x.status) === "Active" ? `<button class="btn danger" onclick="del(K.e,'${esc(x.id)}','executives')">Inactive</button>` : `<button class="btn success" onclick="setExecutiveActive('${esc(x.id)}')">Activate</button>`}</td></tr>`).join("");
+    h = head("Executive", "Team Management", `<div style="display:flex;align-items:center;gap:12px">${toggle}<button class="btn primary" onclick="execForm()">＋ Add Executive</button></div>`) + tableCard("Executive List", ["ID", "Name", "Phone Number", "Status", "Role", "Action"], rows, "et");
   }
 
   if (p === "applications") {
@@ -998,17 +1416,47 @@ function render(p = "dashboard") {
   }
 
 
+  if (p === "transactions") {
+    if (!get(K.transactions).length && DB_ONLINE && !window.__transactionsLoaded) {
+      window.__transactionsLoaded = true;
+      refreshTransactionsFromServer().then(() => {
+        const appRoot = document.getElementById("app");
+        if (appRoot) { render("transactions"); }
+      }).catch(error => { window.__transactionsLoaded = false; toast(error.message || "Unable to load transactions."); });
+      h = head("Transactions", "Transaction Management", `<button class="btn primary top-add-btn" onclick="newTransactionForm()">＋ New Transaction</button>`) + `<div class="card"><div class="empty-state" style="padding:28px;text-align:center;color:#77869a">Loading transactions...</div></div>`;
+    } else {
+      const rows = (get(K.transactions) || []).map(x => `<tr>
+        <td>${esc(x.date || "—")}</td>
+        <td><b>${esc(x.fromName || "—")}</b>${x.fromAc ? `<small class="tx-id">ID: ${esc(x.fromAc)}</small>` : ""}</td>
+        <td><b>${esc(x.toName || "—")}</b>${x.toAc ? `<small class="tx-id">ID: ${esc(x.toAc)}</small>` : ""}</td>
+        <td>${esc(x.fromLoan || "—")}</td>
+        <td>${esc(x.toLoan || "—")}</td>
+        <td><b>${money(x.amount)}</b></td>
+        <td>${esc(x.remark || "—")}</td>
+      </tr>`).join("");
+      h = head("Transactions", "Transaction Management", `<button class="btn primary top-add-btn" onclick="newTransactionForm()">＋ New Transaction</button>`) +
+        tableCard("Transaction History", ["Date", "From A/C", "To A/C", "From Loan", "To Loan", "Amount", "Remark"], rows || "", "transactionTable");
+    }
+  }
+
   if (p === "addloan") {
+    const session = getSession();
     let d = get(K.loans).filter(x => String(x.status || "Active") === "Active");
+    if (isExecutiveUser()) d = d.filter(x => Number(x.assignedExecutiveId) === Number(session.id) || Number(x.executive2Id) === Number(session.id) || Number(x.executive3Id) === Number(session.id) || String(x.executive || "").trim().toLowerCase() === String(session.name || "").trim().toLowerCase());
     const loanRows = (d || []).map(x => {
       const applicant = resolveProfileObject(x.applicant);
-      return `<tr><td>${esc(x.id)}</td><td><b>${esc(applicant?.name || "—")}</b></td><td>${money(x.loanAmount)}</td><td>${esc(x.tenure)} Days</td><td>${esc(x.executive)}</td><td><button class="btn payment-action" onclick="openPayment('${esc(String(x.id))}')">Payment</button> <button class="btn secondary" onclick="viewAddLoan('${esc(String(x.id))}')">View</button> <button class="btn secondary" onclick="addLoanForm('${esc(String(x.id))}')">Edit</button> <button class="btn danger" onclick="deleteAddLoan('${esc(String(x.id))}')">Delete</button></td></tr>`;
+      const actions = isAdminUser()
+        ? `<button class="btn payment-action" onclick="openPayment('${esc(String(x.id))}')">Payment</button> <button class="btn secondary" onclick="viewAddLoan('${esc(String(x.id))}')">View</button> <button class="btn danger" onclick="deleteAddLoan('${esc(String(x.id))}')">Delete</button>`
+        : `<button class="btn payment-action" onclick="openPayment('${esc(String(x.id))}')">Payment</button> <button class="btn secondary" onclick="viewAddLoan('${esc(String(x.id))}')">View</button>`;
+      return `<tr><td>${esc(x.id)}</td><td><b>${esc(applicant?.name || "—")}</b></td><td>${money(x.loanAmount)}</td><td>${esc(x.tenure)} Days</td><td>${esc(x.executive)}</td><td>${actions}</td></tr>`;
     }).join("");
-    h = head("Add Loan", "Loan Creation", `<button class="btn primary top-add-btn" onclick="addLoanForm()">＋ New Loan</button>`) +
+    const title = isExecutiveUser() ? "My Assigned Loans" : "Add Loan";
+    h = head(title, isExecutiveUser() ? "Assigned Customer Loans" : "Loan Creation", isAdminUser() ? `<button class="btn primary top-add-btn" onclick="addLoanForm()">＋ New Loan</button>` : "") +
       tableCard("Active Loan List", ["Loan ID", "Applicant", "Loan Amount", "Tenure", "Executive", "Action"], loanRows, "alt");
   }
 
   if (p === "closeinactive") {
+    if (!isAdminUser()) return render("addloan");
     let d = get(K.loans).filter(x => ["Closed", "Inactive"].includes(String(x.status || "")));
     const loanRows = (d || []).map(x => {
       const applicant = resolveProfileObject(x.applicant);
@@ -1024,17 +1472,38 @@ function render(p = "dashboard") {
     h = head("Merged", "Loan Management", `<button class="btn primary" onclick="mergeForm()">＋ Add</button>`) + tableCard("Merged Loan List", ["Old Loan ID", "Customer Name", "Loan Amount", "Balance", "New Loan Amount", "Executive", "Action"], d.map(x => `<tr><td>${x.oldLoanId}</td><td>${x.customer}</td><td>${money(x.loanAmount)}</td><td>${money(x.balance)}</td><td>${money(x.newLoanAmount)}</td><td>${x.executive}</td><td><button class="btn secondary" onclick="viewMerged('${x.id}')">View</button> <button class="btn secondary" onclick="mergeForm('${x.id}')">Edit</button> <button class="btn danger" onclick="del(K.m,'${x.id}','merged')">Delete</button></td></tr>`).join(""), "mt");
   }
 
+  if (p === "reports") {
+    loadReportAccounts();
+    return;
+  }
+
   $("#app").innerHTML = `<div class="content">${h}</div>`;
   bind();
+  applyCurrentPageSearch();
 }
 
 // Bind Events & Actions
 function bind() {
+  applyResponsiveTableCards();
   all(".find").forEach(i => i.oninput = () => {
     let q = i.value.toLowerCase();
     all("#" + i.dataset.table + " tbody tr").forEach(r => r.style.display = r.innerText.toLowerCase().includes(q) ? "" : "none");
   });
   all(".close").forEach(x => x.onclick = close);
+}
+
+function applyResponsiveTableCards() {
+  all("#app table").forEach(table => {
+    const headers = [...table.querySelectorAll("thead th")].map(header => header.textContent.trim());
+    if (!headers.length) return;
+
+    table.querySelectorAll("tbody tr").forEach(row => {
+      [...row.cells].forEach((cell, index) => {
+        if (cell.colSpan > 1 || cell.hasAttribute("data-label")) return;
+        cell.setAttribute("data-label", headers[index] || "");
+      });
+    });
+  });
 }
 
 function modal(inner) { $("#modal").innerHTML = `<div class="box">${inner}</div>`; $("#modal").classList.add("open"); }
@@ -1128,12 +1597,65 @@ function collectEMIDialog(execName) {
 }
 
 // Executive Form
+function hasExecutiveUsernameConflict(username, excludeId = null) {
+  const candidate = String(username ?? "").trim().toLowerCase();
+  if (!candidate) return false;
+  return (get(K.e) || []).some(v => {
+    if (excludeId !== null && String(v.id) === String(excludeId)) return false;
+    const current = String(v.username || "").trim().toLowerCase();
+    return current && current === candidate;
+  });
+}
+
 function execForm(id) {
   const x = id ? get(K.e).find(v => String(v.id) === String(id)) : {};
   const existingImage = x?.photo?.dataUrl || x?.photo?.data_url || x?.selfImage?.dataUrl || "";
-  modal(`<div class="mhead"><h2>${id ? "Edit" : "Add"} Executive</h2><button class="close">×</button></div><form class="form" id="ef"><div class="grid">${field("Executive ID", "id", x.id || "")}${field("Name", "name", x.name || "")}${field("Phone Number", "phone", x.phone || "")}${field("Email", "email", x.email || "")}${field("Username", "username", x.username || "")}${field("Password", "password", x.password || "", "password")}${field("Joining Date", "joining", x.joining || "", "date")}${sel("Status", "status", ["Active", "On Leave", "Inactive", "Resigned"], x.status)}<div class="field"><label>Executive Photo${!id ? " *" : ""}</label><input type="file" name="photo" accept="image/*">${existingImage ? `<img id="executivePhotoPreview" class="executive-edit-photo" src="${esc(existingImage)}" alt="Existing Executive Photo">` : `<div id="executivePhotoPreview" class="profile-image-empty">No photo uploaded</div>`}<small class="file-help">JPG, JPEG, PNG, WEBP, GIF or BMP • Maximum 1 MB${existingImage ? " • Existing photo will be kept if no new photo is selected" : ""}</small></div></div><div class="formfoot"><button type="button" class="btn secondary close">Cancel</button><button class="btn primary">Save Executive</button></div></form>`);
+  const isFamily = String(x?.role || "").toUpperCase() === "NRE";
 
-  const executivePhotoInput = $("#ef").querySelector('input[name="photo"]');
+  modal(`<div class="mhead"><h2>${id ? "Edit" : "Add"} Executive</h2><button class="close">×</button></div>
+  <form class="form" id="ef">
+    <div class="grid">
+      ${id ? `<div class="field"><label>Executive ID</label><input type="text" value="${esc(x.executive_id ?? x.id ?? "")}" readonly disabled></div>` : ""}
+      ${field("Name", "name", x.name || "")}
+      ${field("Phone Number", "phone", x.phone || "")}
+      ${field("Email", "email", x.email || "")}
+      ${field("Username", "username", x.username || "")}
+      <div class="field"><label>Password</label><div class="password-wrap"><input id="execPassword" type="password" name="password" value="${esc(x.password || "")}" required><button type="button" class="password-eye" onclick="togglePasswordVisibility('execPassword',this)" aria-label="Show password">👁</button></div></div>
+      ${field("Joining Date", "joining", x.joining || "", "date")}
+      ${sel("Status", "status", ["Active", "On Leave", "Inactive", "Resigned"], x.status)}
+      ${id && isFamily
+        ? `<div class="field"><label>Role</label><input type="text" value="NRE (Family)" readonly></div>`
+        : `<div class="field"><label>Role</label><label class="check-row"><input type="checkbox" name="isAdmin" ${String(x.role || "Executive").toLowerCase()==="admin" ? "checked" : ""}> Admin</label></div>
+           ${!id ? `<div class="field"><label>Family</label><label class="check-row"><input type="checkbox" name="family" id="familyExecutive"> Family</label><small class="file-help">Family records use Role = NRE, have no login credentials, and cannot log in.</small></div>` : ""}`}
+      <div class="field"><label>Executive Photo (Optional)</label><input type="file" name="photo" accept="image/*">${existingImage ? `<img id="executivePhotoPreview" class="executive-edit-photo" src="${esc(existingImage)}" alt="Existing Executive Photo">` : `<div id="executivePhotoPreview" class="profile-image-empty">No photo uploaded</div>`}<small class="file-help">JPG, JPEG, PNG, WEBP, GIF or BMP • Maximum 1 MB${existingImage ? " • Existing photo will be kept if no new photo is selected" : ""}</small></div>
+    </div>
+    <div class="formfoot"><button type="button" class="btn secondary close">Cancel</button><button class="btn primary">Save Executive</button></div>
+  </form>`);
+
+  const formEl = $("#ef");
+  const familyCheck = formEl.querySelector('[name="family"]');
+  const adminCheck = formEl.querySelector('[name="isAdmin"]');
+
+  function syncFamilyUI() {
+    const family = isFamily || Boolean(familyCheck?.checked);
+    const userInput = formEl.querySelector('[name="username"]');
+    const passInput = formEl.querySelector('[name="password"]');
+    if (userInput) {
+      userInput.disabled = family;
+      userInput.required = !family;
+      if (family) userInput.value = "";
+    }
+    if (passInput) {
+      passInput.disabled = family;
+      passInput.required = !family;
+      if (family) passInput.value = "";
+    }
+    if (adminCheck) adminCheck.disabled = family;
+  }
+  familyCheck?.addEventListener("change", syncFamilyUI);
+  syncFamilyUI();
+
+  const executivePhotoInput = formEl.querySelector('input[name="photo"]');
   executivePhotoInput?.addEventListener('change', () => {
     const file = executivePhotoInput.files?.[0];
     if (!file || !hasSelectedFile(file)) return;
@@ -1145,28 +1667,37 @@ function execForm(id) {
     }
   });
 
-  $("#ef").onsubmit = async e => {
+  formEl.onsubmit = async e => {
     e.preventDefault();
     const f = new FormData(e.target), d = get(K.e), o = Object.fromEntries(f);
     if(!validatePhone(o.phone)) return toast("Enter valid 10-digit Phone Number!");
+    const family = isFamily || (!id && f.get("family") === "on");
+    if (!family && (!o.username || !o.password)) return toast("Username and password are required.");
+    if (!family && hasExecutiveUsernameConflict(o.username, id)) return toast("This username is already in use. Please choose a different username.");
     const photoFile = f.get("photo");
-    if (!id && !hasSelectedFile(photoFile)) return toast("Executive Photo is mandatory when adding an executive.");
     if (!validateUpload(photoFile, "Executive Photo", true)) return;
     if (hasSelectedFile(photoFile) && photoFile.size > 1024 * 1024) return;
 
     const newPhoto = hasSelectedFile(photoFile) ? await fileMetaWithData(photoFile, null) : null;
     const old = id ? d.find(v => String(v.id) === String(id)) : null;
     const payload = {
-      id: o.id || o.executive_code || id || "",
-      name: o.name, phone: o.phone, email: o.email, username: o.username,
-      password: o.password, joining: o.joining, status: o.status || "Active",
+      id: id ? (old?.executive_code || old?.id || id) : "",
+      name: o.name,
+      phone: o.phone,
+      email: o.email,
+      username: family ? "" : o.username,
+      password: family ? "" : o.password,
+      joining: o.joining,
+      status: o.status || "Active",
+      role: family ? "NRE" : (f.get("isAdmin") === "on" ? "Admin" : "Executive"),
+      family,
       photo: newPhoto || old?.photo || old?.selfImage || null
     };
 
     try {
       if (DB_ONLINE) {
         const target = id ? `/api/executives/${encodeURIComponent(id)}` : "/api/executives";
-        const response = await fetch(target, { method: id ? "PUT" : "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+        const response = await apiFetch(target, { method: id ? "PUT" : "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(data.error || "Executive save failed");
         const saved = normalizeExecutiveRow(data.executive || payload);
@@ -1179,12 +1710,25 @@ function execForm(id) {
       const wallet = get(K.w);
       if (!wallet[payload.name]) wallet[payload.name] = { collected: 0, submitted: 0 };
       put(K.w, wallet);
-      close(); render("executives"); toast("Executive saved");
+      close(); render("executives"); toast(family ? "Family/NRE saved" : "Executive saved");
     } catch (error) {
       toast(error.message || "Could not save executive");
       console.error(error);
     }
   };
+}
+
+function toggleExecutiveStatus(value) { showInactiveExecutives = !!value; render("executives"); }
+async function setExecutiveActive(id) {
+  try {
+    const x = get(K.e).find(v => String(v.id) === String(id));
+    if (!x) return;
+    const response = await apiFetch(`/api/executives/${encodeURIComponent(id)}`, {method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({...x, status:"Active", role:x.role || "Executive"})});
+    const data = await response.json().catch(()=>({}));
+    if (!response.ok) throw new Error(data.error || "Unable to activate executive");
+    put(K.e, get(K.e).map(v => String(v.id) === String(id) ? normalizeExecutiveRow(data.executive) : v));
+    render("executives"); toast("Executive activated");
+  } catch(e) { toast(e.message || "Unable to activate executive"); }
 }
 
 function viewExec(id) {
@@ -1318,7 +1862,7 @@ async function loadLoanProfileSelfImage(profileId, imgEl) {
     }
 
     // User-uploaded images are loaded directly from SQL Server.
-    const r = await fetch(`/api/profile-file/${encodeURIComponent(profileId)}/selfImage`);
+    const r = await apiFetch(`/api/profile-file/${encodeURIComponent(profileId)}/selfImage`);
     if (!r.ok) return;
     const blob = await r.blob();
     if (blob.type.startsWith("image/")) showImage(URL.createObjectURL(blob));
@@ -1331,22 +1875,6 @@ function hydrateLoanPersonImages() {
   all(".loan-person-photo[data-profile-id]").forEach(img => {
     loadLoanProfileSelfImage(img.dataset.profileId, img);
   });
-}
-
-function removeLoanPerson(role) {
-  const edit = window.__editingLoanId || "";
-  const current = edit ? get(K.loans).find(x => x.id === edit) : null;
-  const data = current ? {...current} : (window.__newLoanDraft || {
-    applicant:null, guarantor1:null, guarantor2:null,
-    loanType:"",loanAmount:"",repayAmount:"",tenure:"",emi:"",
-    startDate:"",endDate:"",executive:""
-  });
-  data[role] = null;
-
-  // Allow Applicant, Guarantor 1 and Guarantor 2 to be removed.
-  // Applicant becomes empty and must be selected again before saving the loan.
-  window.__newLoanDraft = data;
-  addLoanForm(edit);
 }
 
 function addLoanPersonCard(role, p) {
@@ -1369,7 +1897,6 @@ function addLoanPersonCard(role, p) {
   return `<div class="loan-person-card selected">
     <div class="loan-person-head">
       <div><span class="loan-role">${title}</span><h3>${esc(person.name)}</h3></div>
-      <button type="button" class="loan-remove" onclick="removeLoanPerson('${role}')" aria-label="Remove ${title}" title="Remove">×</button>
     </div>
 
     <div class="loan-person-photo-wrap">
@@ -1401,11 +1928,11 @@ function addLoanForm(id="", referenceLoanId="") {
   const loans=get(K.loans), old=id?loans.find(x=>String(x.id)===String(id)):null;
   const source=window.__referenceLoanId && !id ? loans.find(x=>String(x.id)===String(window.__referenceLoanId)) : null;
   if(id&&!old)return;
-  const prefix=get(K.p), activeEx=get(K.e).filter(e=>e.status==='Active');
+  const prefix=get(K.p), activeEx=get(K.e).filter(e=>String(e.status || 'Active').toLowerCase()==='active' && String(e.role || 'Executive').trim().toUpperCase()==='EXECUTIVE');
   const data=old||window.__newLoanDraft|| (source ? {
     applicant:source.applicant, guarantor1:source.guarantor1, guarantor2:source.guarantor2,
-    loanType:"",loanAmount:"",repayAmount:"",tenure:"",emi:"",startDate:"",endDate:"",executive:getSession()?.name||""
-  } : {applicant:null,guarantor1:null,guarantor2:null,loanType:"",loanAmount:"",repayAmount:"",tenure:"",emi:"",startDate:"",endDate:"",executive:""});
+    loanType:"",loanAmount:"",repayAmount:"",penaltyFee:0,tenure:"",emi:"",startDate:"",endDate:"",executive:getSession()?.name||""
+  } : {applicant:null,guarantor1:null,guarantor2:null,loanType:"",loanAmount:"",repayAmount:"",penaltyFee:0,tenure:"",emi:"",startDate:"",endDate:"",executive:""});
   window.__newLoanDraft=data;
   window.__activeAddLoanId=id||"";
   const referenceSection=source ? `<div class="loan-detail-section"><div class="title">Previous Loan Reference</div><div class="grid"><div class="field"><label>Reference Loan ID</label><input type="text" name="referenceLoanId" value="${esc(source.id)}" readonly></div><div class="field full"><label>Reference Remark</label><textarea name="referenceRemark" rows="3" placeholder="Why is this new loan being given?">${esc(window.__referenceRemark||'')}</textarea></div></div><p class="form-help">Reference ID is automatically the selected Close &amp; Inactive loan ID.</p></div>` : '';
@@ -1416,9 +1943,9 @@ function addLoanForm(id="", referenceLoanId="") {
       <div class="loan-detail-section"><div class="title">Loan Details</div><div class="grid">
         <div class="field"><label>Prefix Loan</label><select name="prefixLoan" id="addLoanPrefix"><option value="">Select Prefix Loan / Manual Entry</option>${prefix.map(x=>`<option value="${esc(x.id)}" ${String(x.id)===String(data.prefixLoanId)?'selected':''}>${esc(x.id)} — ${esc(x.type)} — ${money(x.amount)}</option>`).join('')}</select></div>
         ${sel('Loan Type','loanType',types,data.loanType||'')}
-        ${num('Loan Amount','loanAmount',data.loanAmount)}${num('Repay Amount','repayAmount',data.repayAmount)}${num('Tenure (Days)','tenure',data.tenure)}${num('EMI','emi',data.emi)}
+        ${num('Loan Amount','loanAmount',data.loanAmount)}${num('Repay Amount','repayAmount',data.repayAmount)}${num('Penalty on Short Payment (₹)','penaltyFee',data.penaltyFee ?? 0)}${num('Tenure (Days)','tenure',data.tenure)}${num('EMI','emi',data.emi)}
         ${field('Start Date','startDate',data.startDate||'','date')}${field('End Date','endDate',data.endDate||'','date')}
-        <div class="field"><label>Assigned Executive</label><select name="executive" id="addLoanExecutive"><option value="">Select Active Executive</option>${activeEx.map(e=>`<option value="${esc(e.name)}" ${e.name===data.executive?'selected':''}>${esc(e.name)}</option>`).join('')}</select></div>
+        ${[1,2,3].map(n=>`<div class="field"><label>Executive ${n}${n===1?' (Required)':' (Optional)'}</label><select name="${n===1?'executive':`executive${n}Id`}" id="addLoanExecutive${n}"><option value="">${n===1?'Select Active Executive':'None'}</option>${activeEx.map(e=>`<option value="${n===1?esc(e.name):esc(e.executive_id ?? '')}" data-executive-id="${esc(e.executive_id ?? '')}" ${(n===1?e.name===data.executive:String(e.executive_id)===String(data[`executive${n}Id`]||''))?'selected':''}>${esc(e.name)}</option>`).join('')}</select></div>`).join('')}
       </div></div>
       <div class="formfoot"><button type="button" class="btn secondary close">Cancel</button><button class="btn primary">${id?'Update Loan':'Save Loan'}</button></div>
     </form>`);
@@ -1427,22 +1954,56 @@ function addLoanForm(id="", referenceLoanId="") {
   function applyPrefix(){const x=get(K.p).find(v=>String(v.id)===String(prefixSelect.value));if(!x)return; amount.value=x.amount;repay.value=x.repay;tenure.value=x.tenure;emi.value=x.emi;type.value=x.type;calcEnd();}
   function calcEnd(){if(start.value&&tenure.value>0){end.value=dateAdd(new Date(start.value+'T00:00:00'),+tenure.value);}}
   function calcTenure(){if(start.value&&end.value){const a=new Date(start.value+'T00:00:00'),b=new Date(end.value+'T00:00:00');const days=Math.round((b-a)/86400000);if(days>=0)tenure.value=days;}}
-  prefixSelect.onchange=applyPrefix; start.onchange=()=>{calcEnd();calcTenure()}; end.onchange=calcTenure; tenure.oninput=calcEnd;
-  f.onsubmit=async e=>{e.preventDefault();const fd=new FormData(f), d=get(K.loans); if(!data.applicant)return toast('Applicant is mandatory.'); if(!fd.get('loanAmount')||+fd.get('loanAmount')<=0)return toast('Enter Loan Amount.'); if(!fd.get('repayAmount')||+fd.get('repayAmount')<0)return toast('Enter Repay Amount.'); if(!fd.get('tenure')||+fd.get('tenure')<=0)return toast('Enter valid Tenure.'); if(!fd.get('emi')||+fd.get('emi')<=0)return toast('Enter valid EMI.'); if(!fd.get('startDate'))return toast('Select Start Date.'); if(!fd.get('endDate'))calcEnd(); if(!fd.get('executive'))return toast('Select an Active Executive.');
+  prefixSelect.onchange=applyPrefix; start.onchange=()=>{calcEnd()}; end.onchange=calcTenure;
+  // Keep loan amount as an independent required input. Any two of Repay Amount,
+  // Tenure and EMI calculate the third; EMI is whole rupees and day one absorbs rounding.
+  let calculatingLoanValues = false;
+  function syncLoanValues(changed) {
+    if (calculatingLoanValues) return;
+    calculatingLoanValues = true;
+    const r = Number(repay.value), t = Number(tenure.value), m = Number(emi.value);
+    const hasR = repay.value.trim() !== '' && Number.isFinite(r) && r > 0;
+    const hasT = tenure.value.trim() !== '' && Number.isFinite(t) && t > 0;
+    const hasM = emi.value.trim() !== '' && Number.isFinite(m) && m > 0;
+    if (changed === 'repay' && hasR && hasM) {
+      tenure.value = String(Math.max(1, Math.ceil(r / m)));
+    } else if (changed === 'repay' && hasR && hasT) {
+      emi.value = String(Math.max(1, Math.round(r / t)));
+    } else if (changed === 'tenure' && hasT && hasR) {
+      emi.value = String(Math.max(1, Math.round(r / t)));
+    } else if (changed === 'tenure' && hasT && hasM) {
+      repay.value = String(Math.round(m) * t);
+    } else if (changed === 'emi' && hasM && hasR) {
+      tenure.value = String(Math.max(1, Math.ceil(r / m)));
+    } else if (changed === 'emi' && hasM && hasT) {
+      repay.value = String(Math.round(m) * t);
+    }
+    if (tenure.value && Number(tenure.value) > 0) calcEnd();
+    calculatingLoanValues = false;
+  }
+  repay.addEventListener('input', () => syncLoanValues('repay'));
+  tenure.addEventListener('input', () => { calcEnd(); syncLoanValues('tenure'); });
+  emi.addEventListener('input', () => syncLoanValues('emi'));
+  f.onsubmit=async e=>{e.preventDefault();const fd=new FormData(f), d=get(K.loans); if(!data.applicant)return toast('Applicant is mandatory.'); if(!fd.get('loanAmount')||+fd.get('loanAmount')<=0)return toast('Enter Loan Amount.'); if(!fd.get('repayAmount')||+fd.get('repayAmount')<+fd.get('loanAmount'))return toast('Repay Amount must be equal to or greater than Loan Amount.'); if(fd.get('penaltyFee')===''||!Number.isFinite(+fd.get('penaltyFee'))||+fd.get('penaltyFee')<0)return toast('Enter a valid Penalty amount (0 or more).'); if(!fd.get('tenure')||+fd.get('tenure')<=0)return toast('Enter valid Tenure.'); if(!fd.get('emi')||+fd.get('emi')<=0)return toast('Enter valid EMI.'); if(!fd.get('startDate'))return toast('Select Start Date.'); if(!fd.get('endDate'))calcEnd(); if(!fd.get('executive'))return toast('Select an Active Executive.');
+    const personIds = [data.applicant?.id, data.guarantor1?.id, data.guarantor2?.id].filter(Boolean).map(v => String(v));
+    if (new Set(personIds).size !== personIds.length) return toast('Applicant, Guarantor 1 and Guarantor 2 must be different profiles.');
     if(source && !String(fd.get('referenceRemark')||'').trim())return toast('Enter Reference Remark.');
     const nextLoanId = typeof buildNextLoanId === 'function' ? buildNextLoanId(d.map(v => v && v.id)) : String(d.length + 1);
-    const o={...(old||{}),id:id||nextLoanId,applicant:data.applicant,guarantor1:data.guarantor1||null,guarantor2:data.guarantor2||null,prefixLoanId:prefixSelect.value,loanType:fd.get('loanType'),loanAmount:+fd.get('loanAmount'),repayAmount:+fd.get('repayAmount'),tenure:+fd.get('tenure'),emi:+fd.get('emi'),startDate:fd.get('startDate'),endDate:fd.get('endDate'),executive:fd.get('executive'),status:'Active',createdBy:getSession()?.id || null,savedAt:new Date().toISOString()};
+    const selectedExecutiveOption = f.querySelector('[name="executive"] option:checked');
+    const assignedExecutiveId = Number(selectedExecutiveOption?.dataset?.executiveId || 0) || null;
+    const executive2Id = Number(f.querySelector('[name="executive2Id"]').value || 0) || null;
+    const executive3Id = Number(f.querySelector('[name="executive3Id"]').value || 0) || null;
+    const selectedExecIds = [assignedExecutiveId, executive2Id, executive3Id].filter(Boolean);
+    if (new Set(selectedExecIds).size !== selectedExecIds.length) return toast('Select different executives for each slot.');
+    const o={...(old||{}),id:id||nextLoanId,applicant:data.applicant,guarantor1:data.guarantor1||null,guarantor2:data.guarantor2||null,prefixLoanId:prefixSelect.value,loanType:fd.get('loanType'),loanAmount:+fd.get('loanAmount'),repayAmount:+fd.get('repayAmount'),penaltyFee:+fd.get('penaltyFee'),tenure:+fd.get('tenure'),emi:+fd.get('emi'),startDate:fd.get('startDate'),endDate:fd.get('endDate'),executive:fd.get('executive'),assignedExecutiveId,executive2Id,executive3Id,status:(old?.status || 'Active'),createdBy:getSession()?.id || null,savedAt:new Date().toISOString()};
     if(source){o.referenceLoanId=source.id;o.referenceRemark=String(fd.get('referenceRemark')||'').trim();}
     try {
       if (DB_ONLINE) {
         const requestBody={...o, forceNewLoan:false};
-        let response = await fetch(id ? `/api/loans/${encodeURIComponent(id)}` : '/api/loans', {method: id ? 'PUT' : 'POST',headers: { 'Content-Type': 'application/json' },body: JSON.stringify(requestBody)});
+        let response = await apiFetch(id ? `/api/loans/${encodeURIComponent(id)}` : '/api/loans', {method: id ? 'PUT' : 'POST',headers: { 'Content-Type': 'application/json' },body: JSON.stringify(requestBody)});
         let payload = await response.json().catch(() => ({}));
-        if(!response.ok && payload.code==='ACTIVE_LOAN_WARNING' && !id){
-          const proceed=confirm(`${payload.error}${payload.activeLoanId ? `\nActive Loan ID: ${payload.activeLoanId}` : ''}\n\nDo you want to create this new loan anyway?`);
-          if(!proceed) return;
-          response=await fetch('/api/loans',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...requestBody,forceNewLoan:true})});
-          payload=await response.json().catch(()=>({}));
+        if(!response.ok && (payload.code==='ACTIVE_LOAN_WARNING' || payload.code==='ACTIVE_LOAN_EXISTS') && !id){
+          throw new Error(`${payload.error || 'This customer already has an active loan.'}${payload.activeLoanId ? ` Active Loan ID: ${payload.activeLoanId}.` : ''}`);
         }
         if (!response.ok) throw new Error(payload.error || 'Unable to save loan');
         const saved = payload.loan || o;
@@ -1470,13 +2031,32 @@ function selectLoanPerson(role){
 }
 function reopenAddLoanWithSelection(){const sel=window.__loanPersonSelection;if(!sel)return; const current=get(K.loans).find(x=>String(x.id)===String(window.__editingLoanId))||null; const data=current?{...current}:window.__newLoanDraft||{applicant:null,guarantor1:null,guarantor2:null,loanType:'',loanAmount:'',repayAmount:'',tenure:'',emi:'',startDate:'',endDate:'',executive:''}; data[sel.role]=sel.profile; window.__newLoanDraft=data; const edit=window.__editingLoanId||''; const reference=window.__referenceLoanId||''; window.__loanPersonSelection=null; addLoanForm(edit,reference);}
 function viewLoanPerson(role){const id=window.__activeAddLoanId;const loan=get(K.loans).find(x=>String(x.id)===String(id));const p=loan?.[role]||window.__newLoanDraft?.[role];if(p)viewProfileObject(p,role==='applicant'?'Applicant Details':role==='guarantor1'?'Guarantor 1 Details':'Guarantor 2 Details');}
-function viewProfileObject(x,title){const contacts=(x.otherContacts||[]).map(c=>`<div class="profile-contact-view"><b>${esc(c.name)}</b><span>${esc(c.relation)}</span><span>${esc(c.phone)}</span></div>`).join('');modal(`<div class="mhead"><div><div class="ey">Profile List</div><h2>${title}</h2></div><button class="close">×</button></div><div class="profile-view"><div class="profile-view-section"><h3>Personal Details</h3><div class="profile-view-grid">${[['Name',x.name],['Age',x.age],['Contact Number',x.phone],['Email',x.email],['Address',x.address],['Work',x.work],['Work Place',x.workPlace],['Office Contact Number',x.officePhone],['Aadhaar No.',x.aadhaar],['PAN No.',x.pan]].map(a=>`<div><label>${a[0]}</label><b>${esc(a[1]||'—')}</b></div>`).join('')}</div></div><div class="profile-view-section"><h3>Uploaded Documents</h3><div class="profile-view-grid"><div><label>Aadhaar Proof</label><b>${esc(x.aadhaarProof?.name||'Not uploaded')}</b></div><div><label>PAN Proof</label><b>${esc(x.panProof?.name||'Not uploaded')}</b></div><div><label>Self Image</label><b>${esc(x.selfImage?.name||'Not uploaded')}</b></div></div></div><div class="profile-view-section"><h3>Other Contact (${(x.otherContacts||[]).length})</h3>${contacts||'<div class="empty-contact">No other contacts added.</div>'}</div></div><div class="foot"><button class="btn secondary close">Close</button></div>`);}
-function viewAddLoan(id){const x=get(K.loans).find(v=>String(v.id)===String(id));if(!x)return;window.__activeAddLoanId=id;window.__editingLoanId=id;modal(`<div class="mhead"><div><div class="ey">Loan Management</div><h2>Loan Details</h2></div><button class="close">×</button></div><div class="loan-view-wrap"><div class="loan-party-grid">${addLoanPersonCard('applicant',x.applicant)}${addLoanPersonCard('guarantor1',x.guarantor1)}${addLoanPersonCard('guarantor2',x.guarantor2)}</div><div class="profile-view-section"><h3>Loan Details</h3><div class="profile-view-grid">${[['Loan ID',x.id],['Prefix Loan',x.prefixLoanId||'Manual Entry'],['Loan Type',x.loanType],['Loan Amount',money(x.loanAmount)],['Repay Amount',money(x.repayAmount)],['Tenure',x.tenure+' Days'],['EMI',money(x.emi)],['Start Date',x.startDate],['End Date',x.endDate],['Executive',x.executive]].map(a=>`<div><label>${a[0]}</label><b>${esc(a[1]||'—')}</b></div>`).join('')}</div></div></div><div class="foot"><button class="btn secondary close">Close</button></div>`);hydrateLoanPersonImages();}
+function viewProfileObject(x,title){modal(`<div class="mhead"><div><div class="ey">Profile List</div><h2>${title}</h2></div><button class="close">×</button></div><div class="profile-view"><div class="profile-view-section"><h3>Personal Details</h3><div class="profile-view-grid">${[['Name',x.name],['Age',x.age],['Contact Number',x.phone],['Email',x.email],['Address',x.address],['Work',x.work],['Work Place',x.workPlace],['Office Contact Number',x.officePhone],['Aadhaar No.',x.aadhaar],['PAN No.',x.pan]].map(a=>`<div><label>${a[0]}</label><b>${esc(a[1]||'—')}</b></div>`).join('')}</div></div>${profileViewSections(x)}</div><div class="foot"><button class="btn secondary close">Close</button></div>`);hydrateProfileViewImages();}
+function loanExecutiveNames(loan = {}) {
+  const executives = get(K.e) || [];
+  const map = new Map(executives.map(ex => [String(ex.executive_id ?? ex.id), ex.name]));
+  const names = [];
+  const pushName = value => {
+    if (!value) return;
+    const text = String(value).trim();
+    if (!text) return;
+    if (!names.includes(text)) names.push(text);
+  };
+
+  pushName(loan.executive);
+  if (loan.assignedExecutiveId) pushName(map.get(String(loan.assignedExecutiveId)) || String(loan.assignedExecutiveId));
+  if (loan.executive2Id) pushName(map.get(String(loan.executive2Id)) || String(loan.executive2Id));
+  if (loan.executive3Id) pushName(map.get(String(loan.executive3Id)) || String(loan.executive3Id));
+
+  return names.join(', ');
+}
+
+function viewAddLoan(id){const x=get(K.loans).find(v=>String(v.id)===String(id));if(!x)return;window.__activeAddLoanId=id;window.__editingLoanId=id;const executiveNames=loanExecutiveNames(x);modal(`<div class="mhead"><div><div class="ey">Loan Management</div><h2>Loan Details</h2></div><button class="close">×</button></div><div class="loan-view-wrap"><div class="loan-party-grid">${addLoanPersonCard('applicant',x.applicant)}${addLoanPersonCard('guarantor1',x.guarantor1)}${addLoanPersonCard('guarantor2',x.guarantor2)}</div><div class="profile-view-section"><h3>Loan Details</h3><div class="profile-view-grid">${[['Loan ID',x.id],['Prefix Loan',x.prefixLoanId||'Manual Entry'],['Loan Type',x.loanType],['Loan Amount',money(x.loanAmount)],['Repay Amount',money(x.repayAmount)],['Penalty on Short Payment',money(x.penaltyFee ?? 0)],['Tenure',x.tenure+' Days'],['EMI',money(x.emi)],['Start Date',x.startDate],['End Date',x.endDate],['Executive',executiveNames || x.executive]].map(a=>`<div><label>${a[0]}</label><b>${esc(a[1]||'—')}</b></div>`).join('')}</div></div></div><div class="foot"><button class="btn secondary close">Close</button></div>`);hydrateLoanPersonImages();}
 async function deleteAddLoan(id){
   if (!confirm('Move this loan to Close & Inactive? The SQL record will be preserved.')) return;
   try {
     if (DB_ONLINE) {
-      const response = await fetch(`/api/loans/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      const response = await apiFetch(`/api/loans/${encodeURIComponent(id)}`, { method: 'DELETE' });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.error || 'Unable to move loan');
     }
@@ -1522,7 +2102,7 @@ async function openPayment(loanId, paymentId = "") {
 
   try {
     const query = new URLSearchParams({ executiveId: String(session.id) });
-    const response = await fetch(`/api/payments/loan/${encodeURIComponent(loanId)}?${query.toString()}`);
+    const response = await apiFetch(`/api/payments/loan/${encodeURIComponent(loanId)}?${query.toString()}`);
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || "Unable to load payment details.");
     renderPaymentModal(data, paymentId);
@@ -1578,12 +2158,12 @@ function renderPaymentModal(data, editPaymentId = "") {
   if (!current) {
     modal(`
       <div class="mhead payment-mhead">
-        <div><div class="ey">Payment</div><h2>${esc(loan.id || "")} — Payment Complete</h2></div>
+        <div><div class="ey">Payment</div><h2>${esc(loan.id || "")} — ${Number(loan.remainingAmount || 0) > 0 ? "No Payment Due Today" : "Payment Complete"}</h2></div>
         <button class="close">×</button>
       </div>
       <div class="payment-empty">
         <div class="payment-empty-icon">✓</div>
-        <h3>${loan.status === "Closed" ? "Loan is Closed" : "No Pending Payment"}</h3>
+        <h3>${loan.status === "Closed" ? "Loan is Closed" : "No payment is due today"}</h3>
         <p>Pay Amount: <b>${money(loan.payAmount || 0)}</b> &nbsp; | &nbsp; Remaining Amount: <b>${money(loan.remainingAmount || 0)}</b></p>
       </div>
       <div class="payment-footer">
@@ -1597,11 +2177,11 @@ function renderPaymentModal(data, editPaymentId = "") {
   }
 
   const isEdit = !!editPaymentId;
-  const serverDate = paymentDateInput(data.serverNow);
+  const serverDate = data.serverDate || paymentDateInput(data.serverNow);
   const customer = loan.customerName || "—";
   const remaining = Number(loan.remainingAmount || 0);
   const penalty = Number(current.penalty_amount || 0);
-  const paying = Number(current.paying_amount || 0);
+  const paying = Math.max(0, Number(current.paying_amount || 0) - Number(current.receiving_amount || 0));
   const totalPaid = Number(loan.payAmount || 0);
 
   modal(`
@@ -1621,7 +2201,7 @@ function renderPaymentModal(data, editPaymentId = "") {
         <div class="payment-card">
           <div class="payment-card-title">Loan Details</div>
           <div class="payment-info-grid">
-            ${paymentField("Today's Date", "todayDate", serverDate, {type:"date"})}
+            ${paymentField("Today's Date", "todayDate", serverDate, {type:"date", readonly:true})}
             ${paymentField("Loan ID", "loanIdDisplay", loan.id, {type:"text", readonly:true})}
             ${paymentField("Customer Name", "customerName", customer, {type:"text", readonly:true})}
             ${paymentField("Pay Amount", "payAmount", totalPaid, {type:"number", readonly:true})}
@@ -1661,6 +2241,7 @@ function renderPaymentModal(data, editPaymentId = "") {
       </div>
 
       <div class="payment-footer">
+        <button type="button" class="btn secondary close">Cancel</button>
         ${!isEdit ? `<button type="button" class="btn warning" id="closeLoanBtn">Close Loan</button>` : ""}
         <button type="submit" class="btn primary">${isEdit ? "Update Payment" : "Submit Payment"}</button>
       </div>
@@ -1687,7 +2268,7 @@ function renderPaymentModal(data, editPaymentId = "") {
     if (discountAmount > Math.max(0, penalty - penaltyAmount)) return toast("Discount cannot exceed the unpaid penalty.");
 
     try {
-      const response = await fetch("/api/payments", {
+      const response = await apiFetch("/api/payments", {
         method: "POST",
         headers: {"Content-Type":"application/json"},
         body: JSON.stringify({
@@ -1703,7 +2284,7 @@ function renderPaymentModal(data, editPaymentId = "") {
       });
       const result = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(result.error || "Unable to save payment.");
-      toast(result.accountClosed ? "Payment saved — account closed" : (isEdit ? "Payment updated" : "Payment saved"));
+      toast(isEdit ? "Payment updated" : "Payment saved");
       close();
       render("addloan");
     } catch (error) {
@@ -1725,7 +2306,7 @@ If you close it now, the loan will move to Close & Inactive and no more EMI will
       }
       if (!confirmOutstanding) return;
       try {
-        const response = await fetch(`/api/payments/close/${encodeURIComponent(loan.id)}`, {
+        const response = await apiFetch(`/api/payments/close/${encodeURIComponent(loan.id)}`, {
           method: "POST", headers: {"Content-Type":"application/json"},
           body: JSON.stringify({executiveId: getSession()?.id || null, confirmOutstanding:true})
         });
@@ -1740,7 +2321,7 @@ If you close it now, the loan will move to Close & Inactive and no more EMI will
 
 function mergeForm(id) {
   let x = id ? get(K.m).find(v => v.id === id) : {};
-  let exs = get(K.e).map(e => `<option ${e.name === x.executive ? "selected" : ""}>${esc(e.name)}</option>`).join("");
+  let exs = get(K.e).filter(e => String(e.status || 'Active').toLowerCase() === 'active' && !['NRE', 'FAMILY'].includes(String(e.role || '').trim().toUpperCase())).map(e => `<option ${e.name === x.executive ? "selected" : ""}>${esc(e.name)}</option>`).join("");
   modal(`<div class="mhead"><h2>${id ? "Edit" : "Add"} Merged Loan</h2><button class="close">×</button></div><form class="form" id="mf"><div class="grid">${field("Old Loan ID", "oldLoanId", x.oldLoanId || "")} ${field("Customer Name", "customer", x.customer || "")} ${num("Loan Amount", "loanAmount", x.loanAmount)} ${num("Balance", "balance", x.balance)} ${num("New Loan Amount", "newLoanAmount", x.newLoanAmount)}<div class="field"><label>Assigned Executive</label><select name="executive">${exs}</select></div></div><p class="form-help">Enter an existing Loan ID.</p><div class="formfoot"><button type="button" class="btn secondary close">Cancel</button><button class="btn primary">Save</button></div></form>`);
   let f = $("#mf"), old = f.querySelector('[name="oldLoanId"]'), customer = f.querySelector('[name="customer"]'), amount = f.querySelector('[name="loanAmount"]');
   function lookup() { let c = get(K.c).find(v => String(v.loanId).toLowerCase() === old.value.trim().toLowerCase()); if (c) { customer.value = c.name; amount.value = c.amount; customer.readOnly = true; amount.readOnly = true; toast("Customer name & amount auto-filled"); } }
@@ -1764,14 +2345,18 @@ async function del(k, id, p) {
 
   try {
     if (k === K.e && DB_ONLINE) {
-      const response = await fetch(`/api/executives/${encodeURIComponent(id)}`, { method: "DELETE" });
+      const response = await apiFetch(`/api/executives/${encodeURIComponent(id)}`, { method: "DELETE" });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.error || "Delete failed");
     }
 
-    put(k, get(k).filter(x => x.id !== id));
+    if (k === K.e) {
+      put(k, get(k).map(x => String(x.id) === String(id) ? { ...x, status: "Inactive" } : x));
+    } else {
+      put(k, get(k).filter(x => x.id !== id));
+    }
     render(p);
-    toast("Deleted");
+    toast(k === K.e ? "Executive marked Inactive" : "Deleted");
   } catch (error) {
     toast(error.message || "Delete failed");
     console.error(error);
@@ -1779,10 +2364,81 @@ async function del(k, id, p) {
 }
 
 // Init Nav Handlers
-all("nav a").forEach(a => a.onclick = () => { render(a.dataset.p); document.querySelector("aside").classList.remove("open"); });
-$("#menu").onclick = () => document.querySelector("aside").classList.toggle("open");
-$("#modal").addEventListener("click", e => { if (e.target.id === "modal" || e.target.closest(".close") || e.target.closest("[data-drawer-close]")) close(); });
-document.addEventListener("keydown", e => { if (e.key === "Escape") close(); });
+const sidebar = document.getElementById("sidebar");
+const menuButton = $("#menu");
+
+function setSidebarOpen(open) {
+  sidebar.classList.toggle("open", open);
+  menuButton.setAttribute("aria-expanded", String(open));
+  menuButton.setAttribute("aria-label", open ? "Close navigation menu" : "Open navigation menu");
+}
+
+document.querySelector("nav").addEventListener("click", event => {
+  const link = event.target.closest("a[data-p]");
+  if (!link) return;
+  event.preventDefault();
+  render(link.dataset.p);
+  setSidebarOpen(false);
+});
+
+menuButton.addEventListener("click", () => {
+  setSidebarOpen(!sidebar.classList.contains("open"));
+});
+
+document.addEventListener("click", event => {
+  if (sidebar.classList.contains("open") && !sidebar.contains(event.target) && !menuButton.contains(event.target)) {
+    setSidebarOpen(false);
+  }
+});
+
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape" && sidebar.classList.contains("open")) {
+    setSidebarOpen(false);
+    menuButton.focus();
+  }
+});
+
+function applyCurrentPageSearch() {
+  const query = $("#search").value.trim().toLocaleLowerCase();
+  const records = all("#app tbody tr, #app .dashboard-loan-row");
+  for (const record of records) {
+    record.hidden = query !== "" && !record.textContent.toLocaleLowerCase().includes(query);
+  }
+}
+
+$("#search").addEventListener("input", applyCurrentPageSearch);
+$("#modal").addEventListener("click", e => {
+  // Do not dismiss a popup by clicking the backdrop. Form popups are cancelled
+  // with their Cancel button; view-only dialogs may still use an explicit Close button.
+  const closeButton = e.target.closest(".close");
+  if (closeButton) {
+    close();
+    return;
+  }
+  if (e.target.closest("[data-drawer-close]")) return;
+});
+// Escape must not dismiss forms/popups; use the visible Cancel/Close control instead.
+document.addEventListener("keydown", e => { if (e.key === "Escape" && $("#modal")?.classList.contains("open")) e.preventDefault(); });
+
+window.addEventListener("popstate", event => {
+  if (!getSession()) {
+    showLoginScreen();
+    return;
+  }
+
+  const page = event.state?.loanPortalPage;
+  if (page) {
+    render(page, true);
+    return;
+  }
+
+  if (/\/login(?:\.html)?\/?$/i.test(location.pathname)) {
+    history.forward();
+    return;
+  }
+
+  render("dashboard", true);
+});
 
 // App Init
 
@@ -1793,8 +2449,9 @@ async function initApp() {
     return;
   }
 
+  applyRolePermissions();
   await bootstrapDatabase();
-  render();
+  render(history.state?.loanPortalPage || "dashboard", true);
 }
 
 const logoutLink = document.querySelector(".logout");
@@ -1802,7 +2459,7 @@ if (logoutLink) {
   logoutLink.addEventListener("click", (event) => {
     event.preventDefault();
     clearSession();
-    showLoginScreen();
+    window.location.href = "/login";
   });
 }
 

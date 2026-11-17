@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Green Finance</string>
+    <string name="title_activity_main">Green Finance</string>
+    <string name="package_name">com.techbugsprojects.greenfinance</string>
+    <string name="custom_url_scheme">com.techbugsprojects.greenfinance</string>
+</resources>

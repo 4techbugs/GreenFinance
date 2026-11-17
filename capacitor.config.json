@@ -1,0 +1,9 @@
+{
+  "appId": "com.techbugsprojects.greenfinance",
+  "appName": "Green Finance",
+  "webDir": "www",
+  "server": {
+    "url": "https://greenfinance.4techbugs.in",
+    "cleartext": false
+  }
+}

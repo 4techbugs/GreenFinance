@@ -7,19 +7,23 @@ const deploymentFiles = [
   "server.js",
   "index.html",
   "login.html",
+  "logo.svg",
   "script.js",
   "style.css",
   "loanIdUtils.js",
+  "paymentScheduleUtils.js",
   "package.json",
   "package-lock.json",
   ".env.example",
   "DEPLOY-LINUX.md",
   "Payment_SQL_Migration.sql",
+  "Transaction_SQL_Migration.sql",
+  "Executive_Username_Unique_Migration.sql",
   "PrefixLoan_SQL_Migration.sql",
   "PrefixLoan_SQL_Setup.sql"
 ];
 
-for (const file of ["server.js", "script.js", "loanIdUtils.js"]) {
+for (const file of ["server.js", "script.js", "loanIdUtils.js", "paymentScheduleUtils.js"]) {
   require("child_process").execFileSync(process.execPath, ["--check", file], {
     cwd: projectRoot,
     stdio: "inherit"

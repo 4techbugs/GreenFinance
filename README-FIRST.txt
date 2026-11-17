@@ -89,6 +89,8 @@ When DB_AUTH=sql, the health check shows:
 PAYMENT WORKFLOW (ADDITIVE)
 - The payment workflow is implemented in the existing Add Loan module.
 - Payment schedule records are stored in dbo.tb_loan_payment.
+- Loans assigned to multiple executives share one repayment schedule and payment history.
+- All assigned executives can view and update the same loan payments.
 - The new SQL migration is Payment_SQL_Migration.sql.
 - New loans create daily payment rows from the loan tenure; partial payments carry forward remaining amount.
 - SQL Server SYSDATETIME() is used for payment timestamps/today's date.
