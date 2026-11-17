@@ -1,6 +1,10 @@
 node_modules/
 dist/
 Wdist/
+Wdist-upload/
+Green-Finance-Web-Fix/
+www/
+*.zip
 .env
 .env.*
 !.env.example
